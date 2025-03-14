@@ -1,0 +1,20 @@
+[tool.poetry]
+name = "liv-vadankhan-analyser"
+version = "0.1.0"
+description = ""
+authors = ["VadanKhan <vadankhan1@gmail.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.11"
+numpy = "^2.2.3"
+scipy = "^1.15.2"
+matplotlib = "^3.10.1"
+pandas = "^2.2.3"
+requests = "^2.32.3"
+bs4 = "^0.0.2"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
