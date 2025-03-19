@@ -11,6 +11,9 @@ import matplotlib.pyplot as plt
 import requests
 from bs4 import BeautifulSoup
 import scipy.stats as st
+from scipy.stats import linregress
+from scipy.signal import savgol_filter
+from scipy.optimize import curve_fit
 import sys
 import time
 
@@ -493,10 +496,143 @@ def plot_specific_touchdown(df_raw_sweeps, wafer_code, touchdown, pnt_size):
     plt.show()
 
 
+def gaussian(x, a, mu, sigma):
+    """Gaussian function for curve fitting."""
+    return a * np.exp(-((x - mu) ** 2) / (2 * sigma**2))
+
+
+def plot_with_smoothing_and_normalization(df_raw_sweeps, wafer_code, touchdown, window_length=5, polyorder=2):
+    specific_data = df_raw_sweeps[(df_raw_sweeps["WAFER_ID"] == wafer_code) & (df_raw_sweeps["TOUCHDOWN"] == touchdown)]
+
+    if specific_data.empty:
+        print(f"No data found for Wafer Code: {wafer_code} and TOUCHDOWN: {touchdown}")
+        return
+
+    # Sort data by LDI to ensure proper plotting
+    specific_data = specific_data.sort_values(by="LDI_mA")
+
+    # Normalize PD using min-max scaling
+    min_PD = specific_data["PD"].min()
+    max_PD = specific_data["PD"].max()
+    specific_data["PD_norm"] = (specific_data["PD"] - min_PD) / (max_PD - min_PD)
+
+    # Apply Savitzky-Golay smoothing to normalized PD
+    smoothed_PD_norm = savgol_filter(specific_data["PD_norm"], window_length=window_length, polyorder=polyorder)
+
+    # Compute differentials on normalized & smoothed data
+    dP_dI_norm = np.gradient(specific_data["PD_norm"], specific_data["LDI_mA"])
+    smoothed_dP_dI_norm = np.gradient(smoothed_PD_norm, specific_data["LDI_mA"])
+
+    d2P_dI2_norm = np.gradient(dP_dI_norm, specific_data["LDI_mA"])
+    smoothed_d2P_dI2_norm = np.gradient(smoothed_dP_dI_norm, specific_data["LDI_mA"])
+
+    # Fit Gaussian to the smoothed second differential
+    try:
+        p0 = [np.max(smoothed_d2P_dI2_norm), np.median(specific_data["LDI_mA"]), np.std(specific_data["LDI_mA"])]
+        popt, _ = curve_fit(gaussian, specific_data["LDI_mA"], smoothed_d2P_dI2_norm, p0=p0)
+        gaussian_fit = gaussian(specific_data["LDI_mA"], *popt)
+        median_x = popt[1]  # Extract median x from Gaussian fit
+    except:
+        gaussian_fit = np.zeros_like(smoothed_d2P_dI2_norm)
+        median_x = np.nan  # Handle fit failure gracefully
+
+    fig, axes = plt.subplots(3, 2, figsize=(18, 20))  # Extra row for line fitting plot
+
+    # Normalized PD vs LDI (Unsmoothed)
+    axes[0, 0].plot(specific_data["LDI_mA"], specific_data["PD_norm"], color="blue", label="Normalized PD (Raw)")
+    axes[0, 0].set_title(f"{wafer_code}: PD vs LDI (Normalized, Unsmoothed)")
+    axes[0, 0].set_xlabel("LDI_mA")
+    axes[0, 0].set_ylabel("Normalized PD")
+    axes[0, 0].grid(True)
+
+    # Normalized PD vs LDI (Smoothed)
+    axes[0, 1].plot(specific_data["LDI_mA"], smoothed_PD_norm, color="red", label="Normalized PD (Smoothed)")
+    axes[0, 1].set_title(f"{wafer_code}: PD vs LDI (Normalized & Smoothed)")
+    axes[0, 1].set_xlabel("LDI_mA")
+    axes[0, 1].set_ylabel("Normalized PD")
+    axes[0, 1].grid(True)
+
+    # Normalized dP/dI (Unsmoothed)
+    axes[1, 0].plot(specific_data["LDI_mA"], dP_dI_norm, color="blue", label="dP/dI (Raw)")
+    axes[1, 0].set_title(f"{wafer_code}: dP/dI (Normalized, Unsmoothed)")
+    axes[1, 0].set_xlabel("LDI_mA")
+    axes[1, 0].set_ylabel("dP/dI")
+    axes[1, 0].grid(True)
+
+    # Normalized dP/dI (Smoothed)
+    axes[1, 1].plot(specific_data["LDI_mA"], smoothed_dP_dI_norm, color="red", label="dP/dI (Smoothed)")
+    axes[1, 1].set_title(f"{wafer_code}: dP/dI (Normalized & Smoothed)")
+    axes[1, 1].set_xlabel("LDI_mA")
+    axes[1, 1].set_ylabel("dP/dI")
+    axes[1, 1].grid(True)
+
+    # Normalized d2P/dI2 (Unsmoothed)
+    axes[2, 0].plot(specific_data["LDI_mA"], d2P_dI2_norm, color="blue", label="d2P/dI2 (Raw)")
+    axes[2, 0].set_title(f"{wafer_code}: d2P/dI2 (Normalized, Unsmoothed)")
+    axes[2, 0].set_xlabel("LDI_mA")
+    axes[2, 0].set_ylabel("d2P/dI2")
+    axes[2, 0].grid(True)
+
+    # Normalized d2P/dI2 (Smoothed) + Gaussian Fit
+    axes[2, 1].plot(specific_data["LDI_mA"], smoothed_d2P_dI2_norm, color="red", label="d2P/dI2 (Smoothed)")
+    axes[2, 1].plot(specific_data["LDI_mA"], gaussian_fit, color="purple", linestyle="dashed", label="Gaussian Fit")
+
+    # Mark median_x with a vertical line
+    if not np.isnan(median_x):
+        axes[2, 1].axvline(median_x, color="black", linestyle="dotted", label=f"Median: {median_x:.3f}")
+
+    axes[2, 1].set_title(f"{wafer_code}: d2P/dI2 (Normalized & Smoothed) + Gaussian Fit")
+    axes[2, 1].set_xlabel("LDI_mA")
+    axes[2, 1].set_ylabel("d2P/dI2")
+    axes[2, 1].grid(True)
+    axes[2, 1].legend()
+
+    # ------------------- LINEAR FITTING SECTION (Separate Figure) -------------------
+    if not np.isnan(median_x):
+        # Split data at median_x
+        left_side = specific_data[specific_data["LDI_mA"] <= median_x]
+        right_side = specific_data[specific_data["LDI_mA"] > median_x]
+
+        # Fit linear regression to both segments
+        slope_left, intercept_left, _, _, _ = linregress(left_side["LDI_mA"], left_side["PD_norm"])
+        slope_right, intercept_right, _, _, _ = linregress(right_side["LDI_mA"], right_side["PD_norm"])
+
+        # Generate fitted lines
+        fit_left = slope_left * left_side["LDI_mA"] + intercept_left
+        fit_right = slope_right * right_side["LDI_mA"] + intercept_right
+
+        # Compute intersection point
+        intersection_x = (intercept_right - intercept_left) / (slope_left - slope_right)
+        intersection_y = slope_left * intersection_x + intercept_left
+
+        # Create a separate figure for linear fits
+        plt.figure(figsize=(10, 6))
+
+        # Plot original normalized PD data as scatter points
+        plt.scatter(specific_data["LDI_mA"], specific_data["PD_norm"], color="green", marker="+", alpha=1, label="Original Data")
+
+        # Plot linear fits
+        plt.plot(left_side["LDI_mA"], fit_left, color="blue", label=f"Left Fit (Slope={slope_left:.3f})")
+        plt.plot(right_side["LDI_mA"], fit_right, color="red", label=f"Right Fit (Slope={slope_right:.3f})")
+
+        # Mark the intersection point
+        plt.scatter(intersection_x, intersection_y, color="black", marker="x", s=200, label=f"Intersection at LDI={intersection_x:.3f}")
+
+        # Labels and title
+        plt.title(f"{wafer_code}: Linear Fits Split at Median")
+        plt.xlabel("LDI_mA")
+        plt.ylabel("Normalized PD")
+        plt.legend()
+        plt.grid(True)
+
+    plt.tight_layout()
+    plt.show()
+
+
 # INPUT THE DESIRED PROFILE TO EXAMINE HERE
 # Define the specific wafer code and TOUCHDOWN number
 WAFER_CODE = "QCHZZ"
-TOUCHDOWN = 22
+TOUCHDOWN = 30
 
 # Find the correct dataframe where the wafer code matches the input
 df_raw_sweeps = None
@@ -507,6 +643,7 @@ for df in annotated_sweeps_tables:
 
 if df_raw_sweeps is not None:
     # Plot for the specified touchdown number
-    plot_specific_touchdown(df_raw_sweeps, WAFER_CODE, TOUCHDOWN, pnt_size=5)
+    # plot_specific_touchdown(df_raw_sweeps, WAFER_CODE, TOUCHDOWN, pnt_size=5)
+    plot_with_smoothing_and_normalization(df_raw_sweeps, WAFER_CODE, TOUCHDOWN, window_length=5, polyorder=2)
 else:
     print(f"No data found for Wafer Code: {WAFER_CODE}")
