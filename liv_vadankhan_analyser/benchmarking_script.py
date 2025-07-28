@@ -3,7 +3,7 @@ import time
 import os
 import traceback
 
-# import warnings
+import warnings
 import requests
 from pathlib import Path
 from bs4 import BeautifulSoup
@@ -34,7 +34,8 @@ from sklearn.linear_model import RANSACRegressor, LinearRegression
 
 CURRENT_DIR = Path(os.getcwd())
 # Move to the root directory
-ROOT_DIR = CURRENT_DIR.parents[0]  # Adjust the number based on your folder structure
+ROOT_DIR = CURRENT_DIR  # Adjust the number based on your folder structure
+print(ROOT_DIR)
 # Add the root directory to the system path
 sys.path.append(str(ROOT_DIR))
 # Import the importlib module
@@ -182,6 +183,8 @@ def liv_raw_filelink_finder(
 
     return wafer_records, missing
 
+
+warnings.filterwarnings("ignore")
 
 # ----------------------------- INPUTS ----------------------------- #
 
