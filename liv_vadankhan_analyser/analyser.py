@@ -433,6 +433,7 @@ def find_spd(
     mean_power = np.mean(intensity)
     peak_power = np.max(intensity)
     current_at_peak_power = current[np.argmax(intensity)]
+    max_current = np.max(current)
 
     delta_spd = mean_power - np.abs(dP_dI)
     min_delta = np.min(delta_spd)
@@ -441,7 +442,7 @@ def find_spd(
 
     # Find the first index where delta_spd < threshold
     first_spd_idx = np.argmax(delta_spd < spd_delta_threshold) if np.any(delta_spd < spd_delta_threshold) else None
-    first_spd_current = current_mid[first_spd_idx] if first_spd_idx is not None else np.nan
+    first_spd_current = current_mid[first_spd_idx] if first_spd_idx is not None else max_current
 
     if min_delta > spd_delta_threshold:
         spd_eval = "ROLLOVER"
@@ -463,6 +464,7 @@ def find_spd(
         else:
             pot_failmode = spd_eval
     else:
+        current_at_spd = max_current
         pot_failmode = spd_eval
 
     # Voltage noise for current >= noise_threshold, using midpoint-based current
@@ -626,6 +628,213 @@ def redo_fit_if_kink_too_early(
         "lower_threshold": lower_threshold,
         "upper_threshold": upper_threshold,
     }
+
+
+def find_kink(
+    intensity,
+    current,
+    voltage,
+    ith,
+    disable_smooth=True,
+    trim_end_points=2,
+    trim_boundary_points=5,
+    deviation_percentage_threshold=10,
+    threshold_min_delta=1,
+    second_deriv_deviation_threshold=0.0005,
+    early_kink_threshold=50,
+):
+    spd_detected = False
+    low_kink_flag = False
+    first_spd_current = 0
+    spd_current = 0
+
+    intensity = np.asarray(intensity)
+    current = np.asarray(current)
+    max_current = np.max(current)
+
+    if len(intensity) != len(current):
+        print("Warning: Input arrays have different lengths.")
+        return {
+            "kink_current": 0,
+            "spd_detected": spd_detected,
+            "spd_current": spd_current,
+            "first_spd_current": first_spd_current,
+            "low_kink_flag": low_kink_flag,
+        }
+
+    # ---------------- Remove Points before I_threshold ---------------- #
+    mask = current >= ith
+    if not np.any(mask):
+        print("Warning: No current values above the threshold found.")
+        return {
+            "kink_current": 0,
+            "spd_detected": spd_detected,
+            "spd_current": spd_current,
+            "first_spd_current": first_spd_current,
+            "low_kink_flag": low_kink_flag,
+        }
+    idx_start = np.argmax(mask)
+
+    I_raw = current[idx_start:]
+    L_raw = intensity[idx_start:]
+    V = voltage[idx_start:]
+
+    if len(L_raw) < trim_boundary_points + 1:
+        print("Warning: Not enough points after Ith for analysis.")
+        return {
+            "kink_current": 0,
+            "spd_detected": spd_detected,
+            "spd_current": spd_current,
+            "first_spd_current": first_spd_current,
+            "low_kink_flag": low_kink_flag,
+        }
+
+    # # ----------------- Compute delta for SPD filtering ---------------- #
+    # dLdI_temp = np.gradient(L_raw, I_raw)
+    # delta = np.mean(L_raw) - np.abs(dLdI_temp)
+    # min_delta = np.min(delta)
+    # max_pd = np.max(L_raw)
+
+    # ------------- Normalize and Compute smoothed L and derivatives ------------- #
+    I = I_raw
+    L_raw_norm = L_raw / np.max(L_raw) if np.max(L_raw) > 0 else L_raw
+
+    LV_window_gen_smooth = 1
+    L = (
+        L_raw_norm
+        if disable_smooth
+        else savgol_filter(L_raw_norm, window_length=2 * LV_window_gen_smooth + 1, polyorder=1)
+    )
+
+    dLdI = np.gradient(L, I)
+    d2LdI2 = np.gradient(np.gradient(L, I), I)
+
+    # ----------------------- SPD Filtering ----------------------- #
+    spd_results = find_spd(current, intensity, voltage, spd_delta_threshold=threshold_min_delta)
+    spd_eval = spd_results["spd_eval"]
+    first_spd_current = spd_results["first_spd_current"]
+    spd_current = spd_results["current_at_spd"]
+    if spd_eval not in ["COD", "COD-PR"]:
+        first_spd_current = max_current
+        spd_current = max_current
+
+    if spd_eval in ["COD", "COD-PR"]:
+        # Find index in I array where current >= first_spd_current
+        cutoff_idx = np.argmax(I >= spd_current)
+        I_non_spd = I[:cutoff_idx]
+        L_non_spd = L[:cutoff_idx]
+        dLdI_non_spd = dLdI[:cutoff_idx]
+        d2LdI2_non_spd = d2LdI2[:cutoff_idx]
+        spd_detected = True
+        # print("SPD DETECTED: TRIMMING ARRAYS")
+    else:
+        I_non_spd = I
+        L_non_spd = L
+        dLdI_non_spd = dLdI
+        d2LdI2_non_spd = d2LdI2
+
+    if len(I_non_spd) < trim_boundary_points + 1:
+        print("Warning: Not enough points after SPD filtering.")
+        return {
+            "kink_current": 0,
+            "spd_detected": spd_detected,
+            "spd_current": spd_current,
+            "first_spd_current": first_spd_current,
+            "low_kink_flag": low_kink_flag,
+        }
+
+    # -------------- Hardcoded Trimming of Boundary Points -------------- #
+    n_points = len(I_non_spd)
+    if n_points < trim_boundary_points + trim_end_points + 3:
+        print("Warning: Not enough points after trimming for fit.")
+        return {
+            "kink_current": 0,
+            "spd_detected": spd_detected,
+            "spd_current": spd_current,
+            "first_spd_current": first_spd_current,
+            "low_kink_flag": low_kink_flag,
+        }
+
+    I_trimmed = I_non_spd[trim_boundary_points : n_points - trim_end_points]
+    L_trimmed = L_non_spd[trim_boundary_points : n_points - trim_end_points]
+    dLdI_trimmed = dLdI_non_spd[trim_boundary_points : n_points - trim_end_points]
+    d2LdI2_trimmed = d2LdI2_non_spd[trim_boundary_points : n_points - trim_end_points]
+
+    try:
+        # ---------------- 2nd Derivative Masking Algorithm ---------------- #
+        curved_start_idx, d2LdI2_smoothed, lower_threshold, upper_threshold = exclusion_based_on_second_derivative(
+            d2LdI2_trimmed, I_trimmed, second_deriv_deviation_threshold=second_deriv_deviation_threshold
+        )
+
+        # ------------------ Split data based on the mask ------------------ #
+        I_fit = I_trimmed[:curved_start_idx]
+        dLdI_fit = dLdI_trimmed[:curved_start_idx]
+        I_rest = I_trimmed[curved_start_idx:]
+        dLdI_rest = dLdI_trimmed[curved_start_idx:]
+
+        # ----------------- Linear Stimulated Fit Algorithm ---------------- #
+        dLdI_linear_fit = apply_weighted_linear_fit(I_fit, dLdI_fit, I_rest, dLdI_rest, I_non_spd)
+
+        # ---------- Deviation Calculating and Kink Classification --------- #
+        deviations = 100 * np.abs(dLdI_non_spd - dLdI_linear_fit) / np.maximum(np.abs(dLdI_linear_fit), 5e-2)
+        deviations_to_check = deviations[trim_boundary_points : n_points - trim_end_points]
+        kink_mask = deviations_to_check > deviation_percentage_threshold
+        # print(kink_mask)
+        kink_current = I_trimmed[kink_mask][0] if np.any(kink_mask) else 63
+
+        # ----------------------- Handle early kinks ----------------------- #
+        kink_index = np.argmax(kink_mask) if np.any(kink_mask) else None
+        # print(f"kink_index = {kink_index}")
+        early_deviations = deviations[:trim_boundary_points]
+        mean_early_deviations = np.mean(early_deviations)
+        # print(f"mean_early_deviations = {mean_early_deviations}")
+
+        if kink_index is not None and kink_index <= 5 or mean_early_deviations > early_kink_threshold:
+            print("Warning: Low Kink Detected, Using Low Kink Countermeasures")
+            low_kink_flag = True
+            redo_result = redo_fit_if_kink_too_early(
+                I_non_spd=I_non_spd,
+                dLdI_non_spd=dLdI_non_spd,
+                I_trimmed=I_trimmed,
+                dLdI_trimmed=dLdI_trimmed,
+                d2LdI2_trimmed=d2LdI2_trimmed,
+                second_deriv_deviation_threshold=second_deriv_deviation_threshold,
+                trim_boundary_points=trim_boundary_points,
+                trim_end_points=trim_end_points,
+                n_points=n_points,
+                deviation_percentage_threshold=deviation_percentage_threshold,
+            )
+            dLdI_linear_fit = redo_result["dLdI_linear_fit"]
+            kink_index = redo_result["kink_index"]
+            kink_current = redo_result["kink_current"]
+            curved_start_idx = redo_result["curved_start_idx"]
+            d2LdI2_smoothed = redo_result["d2LdI2_smoothed"]
+            trim_boundary_points = redo_result["trim_boundary_points"]
+            I_trimmed = redo_result["I_trimmed"]
+            dLdI_trimmed = redo_result["dLdI_trimmed"]
+            d2LdI2_trimmed = redo_result["d2LdI2_trimmed"]
+            deviations_to_check = redo_result["deviations_low_kink"]
+            lower_threshold = redo_result["lower_threshold"]
+            upper_threshold = redo_result["upper_threshold"]
+
+        return {
+            "kink_current": kink_current,
+            "spd_detected": spd_detected,
+            "spd_current": spd_current,
+            "first_spd_current": first_spd_current,
+            "low_kink_flag": low_kink_flag,
+        }
+
+    except Exception as e:
+        print(f"Error during kink detection: {e}")
+        traceback.print_exc()
+        return {
+            "kink_current": 0,
+            "spd_detected": spd_detected,
+            "spd_current": spd_current,
+            "first_spd_current": first_spd_current,
+            "low_kink_flag": low_kink_flag,
+        }
 
 
 def find_kink_fast_spd(
@@ -885,12 +1094,15 @@ def transform_raw_liv_file_every_nth_laser_chunked(
                 tqdm.write(f"Warning: '{peak_wavelength_col}' column not found in chunk.")
 
             # Extract Leakage Current
-            leakage_current_col = "Leakage_current"
-            if leakage_current_col in chunk.columns:
-                leakage_currents = chunk.set_index("TOUCHDOWN")[leakage_current_col].to_dict()
+            preferred_columns = ["Leakage_current", "Leakage_current (uA)"]
+            leakage_currents = {}
+
+            for col in preferred_columns:
+                if col in chunk.columns:
+                    leakage_currents = chunk.set_index("TOUCHDOWN")[col].to_dict()
+                    break
             else:
-                leakage_currents = {}
-                tqdm.write(f"Warning: '{leakage_current_col}' column not found in chunk.")
+                tqdm.write(f"Warning: None of the expected leakage current columns found: {preferred_columns}")
 
             # Extract Reverse Voltage
             reverse_voltage_col = "Reverse_voltage"
@@ -1042,7 +1254,7 @@ def stream_process_lasing_parameters(
         "SLOPE_EFF_MW_MA",
         "RS_FIT_OHMS",
         "PEAK_WAVE_AT35_NM",
-        "SPD_CURRENT",
+        "CURRENT_AT_SPD",
         "KINK1_CURRENT_MA",
         "LEAK_CURR_UA",
         "REVERSE_VOLTS_V",
@@ -1257,6 +1469,273 @@ def stream_process_lasing_parameters(
 
 
 def stream_process_lasing_parameters_cod(
+    filepath,
+    summary_output_path,
+    ini_data,
+    decoder_path,
+    sampling_freq=10000,
+    chunksize=10000,
+    export_buffer=1000,
+):
+
+    accumulator = {}
+    summary_records = []
+    melted_records = []
+    dat_output_path = Path(summary_output_path).with_suffix(".dat")
+    dat_file_exists = dat_output_path.exists()
+    total_processed = 0  # 👈 Counter for total exported rows
+    total_exported_rows = 0  # 👈 Counter for total exported rows
+    pt_counter = 0  # 👈 Counter for melted .dat file rows
+
+    # ⬇️ Unpack ini_data dictionary
+    INI_LOT = ini_data["INI_LOT"]
+    wafer_code = INI_LOT
+    INI_WAFER = ini_data["INI_WAFER"]
+    INI_OP = ini_data["INI_OP"]
+    INI_STAGE = ini_data["INI_STAGE"]
+    INI_STEP = ini_data["INI_STEP"]
+    INI_PROD = ini_data["INI_PROD"]
+    product_code = INI_PROD
+    INI_MACH = ini_data["INI_MACH"]
+    machine_code = INI_MACH
+    INI_EMPID = ini_data["INI_EMPID"]
+    INI_MEAS_TYPE = ini_data["INI_MEAS_TYPE"]
+    INI_PDATETIME = ini_data["INI_PDATETIME"]
+    INI_XDIVIDING_FACTOR = ini_data["INI_XDIVIDING_FACTOR"]
+    INI_YDIVIDING_FACTOR = ini_data["INI_YDIVIDING_FACTOR"]
+    FAC = ini_data.get("FAC", "STST")  # default fallback
+    CARD = ini_data.get("CARD", 0)
+    COND = ini_data.get("COND", "Py_v1.0")
+    STRUCT = ini_data.get("STRUCT", "L")
+    PRODUCT_TYPE = ini_data["PRODUCT_TYPE"]
+    UNIT_DICT = ini_data["UNIT_DICT"]
+
+    columns_local = [
+        "WAFER_ID",
+        "WAFER_TYPE",
+        "MACH_NUM",
+        "LIV_ANALYZER_VERSION",
+        "TE_LABEL",
+        "TOUCHDOWN",
+        "ITH_MA",
+        "SLOPE_EFF_MW_MA",
+        "RS_FIT_OHMS",
+        "PEAK_WAVE_AT35_NM",
+        "CURRENT_AT_SPD",
+        "KINK1_CURRENT_MA",
+        "LEAK_CURR_UA",
+        "REVERSE_VOLTS_V",
+        "CUBE_NUM",
+        "TYPE",
+        "STX_WAFER_X_UM",
+        "STX_WAFER_Y_UM",
+        "FLAG_LOW_POUT",
+    ]
+
+    columns_levee = [
+        "PDATETIME",
+        "LOT",
+        "WAFER",
+        "OP",
+        "STAGE",
+        "STEP",
+        "PROD",
+        "MACH",
+        "FAC",
+        "CARD",
+        "EMPID",
+        "FLD",
+        "MEAS_TYPE",
+        "COND",
+        "PT",
+        "PT_LOC_X",
+        "PT_LOC_Y",
+        "STRUCT",
+        "PARAM",
+        "MEAS_PT",
+        "UNITS",
+    ]
+
+    file_exists = Path(summary_output_path).exists()  # 👈 Avoid repeated checks
+
+    tqdm.write("Processing Initiated:")
+
+    for transformed_data in transform_raw_liv_file_every_nth_laser_chunked(
+        filepath, decoder_path, machine_code, wafer_code, sampling_freq, chunksize
+    ):
+        processed_in_chunk = 0  # count lasers processed in this chunk
+
+        chunk = transformed_data["chunk"]
+        n_meas = transformed_data["n_meas"]
+        peak_wavelengths = transformed_data["peak_wavelengths"]
+        leakage_currents = transformed_data["leakage_currents"]
+        reverse_voltages = transformed_data["reverse_voltages"]
+        cube_numbers = transformed_data["cube_numbers"]
+
+        # start_groupby = time.time()  # ⬅️ START
+        grouped = chunk.groupby("TE_LABEL")
+        # t_groupby += time.time() - start_groupby  # ⬅️ END
+
+        for te_label, group in grouped:
+
+            if te_label not in accumulator:
+                accumulator[te_label] = [group]
+            else:
+                accumulator[te_label].append(group)
+
+            if sum(len(g) for g in accumulator[te_label]) >= n_meas:
+                full_data = pd.concat(accumulator[te_label], ignore_index=True)
+                touchdown = full_data["TOUCHDOWN"].iloc[0] if "TOUCHDOWN" in full_data else ""
+
+                current = full_data["LDI_mA"].values
+                intensity = full_data["PD"].values
+                voltage = full_data["Vf"].values
+
+                no_laser_flag = flag_no_laser(intensity)
+
+                if no_laser_flag:
+                    flag = 1
+                    ith = 0
+                    slope_eff = 0
+                    series_r = 0
+                    kink_current = 0
+                    peak_wl = 0
+                    leakage_current = 0
+                    reverse_voltage = 0
+                    cube_number = 0
+                    spd_current = 0
+                    KNKPPD_BL = 0  # Dummy Values set in lieu of generation of these parameters that labview does
+                    KNKKMM_BL = 0  # Dummy Values set in lieu of generation of these parameters that labview does
+                else:
+                    flag = 0
+                    ith = find_ith_value(intensity, current)
+
+                    slope_eff = find_slope_efficiency(intensity, current, ith) if ith else 0
+
+                    series_r = find_series_resistance(voltage, current, ith) if ith else 0
+                    kink_results = find_kink(intensity, current, voltage, ith)
+                    kink_current = kink_results["kink_current"]
+                    spd_current = kink_results["spd_current"]
+
+                    peak_wl = peak_wavelengths.get(touchdown, np.nan) if peak_wavelengths else np.nan
+                    leakage_current = leakage_currents.get(touchdown, np.nan) if leakage_currents else np.nan
+                    reverse_voltage = reverse_voltages.get(touchdown, np.nan) if reverse_voltages else np.nan
+                    cube_number = cube_numbers.get(touchdown, np.nan) if cube_numbers else "not_found"
+
+                    KNKPPD_BL = 99999  # Dummy Values set in lieu of generation of these parameters that labview does
+                    KNKKMM_BL = 99999  # Dummy Values set in lieu of generation of these parameters that labview does
+
+                summary_records.append(
+                    [
+                        wafer_code,
+                        product_code,
+                        machine_code,
+                        f"py_v{VERSION}",
+                        te_label,
+                        touchdown,
+                        ith,
+                        slope_eff,
+                        series_r,
+                        peak_wl,
+                        spd_current,
+                        kink_current,
+                        leakage_current,
+                        reverse_voltage,
+                        cube_number,
+                        full_data["TYPE"].iloc[0],
+                        full_data["X_UM"].iloc[0],
+                        full_data["Y_UM"].iloc[0],
+                        flag,
+                    ]
+                )
+
+                melted_entries = [
+                    ("ITH_BL", ith),
+                    ("SE_BL", slope_eff),
+                    ("RS_BL", series_r),
+                    ("PW_BL", peak_wl),
+                    ("ISPD_BL", spd_current),
+                    ("KNK1_BL", kink_current),
+                    ("KNKPPD_BL", KNKPPD_BL),
+                    ("KNKMM_BL", KNKKMM_BL),
+                    ("ILK_BL", leakage_current),
+                    ("RV_BL", reverse_voltage),
+                ]
+
+                for param, val in melted_entries:
+                    melted_records.append(
+                        [
+                            INI_PDATETIME,
+                            INI_LOT,
+                            INI_WAFER,
+                            INI_OP,
+                            INI_STAGE,
+                            INI_STEP,
+                            INI_PROD,
+                            INI_MACH,
+                            FAC,
+                            CARD,
+                            INI_EMPID,
+                            cube_number,
+                            INI_MEAS_TYPE,
+                            COND,
+                            pt_counter,
+                            convert_x_position(
+                                full_data["X_UM"].iloc[0],
+                                dividing_factor=INI_XDIVIDING_FACTOR,
+                                product_type=PRODUCT_TYPE,
+                            ),
+                            convert_y_position(
+                                full_data["Y_UM"].iloc[0],
+                                dividing_factor=INI_YDIVIDING_FACTOR,
+                                product_type=PRODUCT_TYPE,
+                            ),
+                            STRUCT,
+                            param,
+                            val,
+                            UNIT_DICT.get(param, ""),
+                        ]
+                    )
+
+                    pt_counter += 1  # 👈 increment once per row
+
+                del accumulator[te_label]
+
+                if len(summary_records) >= export_buffer:
+                    df_to_export = pd.DataFrame(summary_records, columns=columns_local)
+                    df_to_export.to_csv(Path(summary_output_path), mode="a", header=not file_exists, index=False)
+                    file_exists = True
+                    total_exported_rows += len(df_to_export)  # 👈 Update counter
+                    tqdm.write(f"🔼 Processed {len(df_to_export)} devices. Total exported: {total_exported_rows}")
+                    summary_records.clear()
+                if len(melted_records) >= export_buffer:
+                    df_melted_export = pd.DataFrame(melted_records, columns=columns_levee)
+                    df_melted_export.to_csv(
+                        dat_output_path, mode="a", header=not dat_file_exists, index=False, sep="\t"
+                    )
+                    dat_file_exists = True
+                    melted_records.clear()
+
+                processed_in_chunk += 1
+
+        total_processed += processed_in_chunk
+        tqdm.write(f"🔼 Processed {processed_in_chunk} lasers in this chunk. Total processed: {total_processed}")
+
+    tqdm.write(f"Data Exporting to: {summary_output_path}")
+    if summary_records:
+        df_to_export = pd.DataFrame(summary_records, columns=columns_local)
+        df_to_export.to_csv(summary_output_path, mode="a", header=not file_exists, index=False)
+        total_exported_rows += len(df_to_export)
+        tqdm.write(f"🔼 Final export of {len(df_to_export)} rows. Total exported: {total_exported_rows}")
+    if melted_records:
+        df_melted_export = pd.DataFrame(melted_records, columns=columns_levee)
+        df_melted_export.to_csv(dat_output_path, mode="a", header=not dat_file_exists, index=False, sep="\t")
+        tqdm.write(f"🔼 Final .dat export of {len(df_melted_export)} rows.")
+
+    tqdm.write(f"✓ Device summary exported for {wafer_code}")
+
+
+def stream_process_lasing_parameters_cod_localbuild(
     filepath,
     device_summary_path,
     ini_data,
@@ -1524,7 +2003,6 @@ def extract_test_type_from_file(file_path):
 def initialise_lasing_processing(file_path, detection_time, test_type):
     ini_dict = load_ini_data(INI_LOCATION)
     INI_MACH = ini_dict["INI_MACH"]
-    machine_code = INI_MACH  # just for readability
     INI_LOT = ini_dict["INI_LOT"]
     wafer_code = INI_LOT  # just for readability
     PRODUCT_TYPE = ini_dict["PRODUCT_TYPE"]
@@ -1539,7 +2017,6 @@ def initialise_lasing_processing(file_path, detection_time, test_type):
             print("Non-Halo Wafer Detected, Using Subaru Decoder\n")
             decoder_path = ROOT_DIR / "decoders" / SUBARU_DECODER
 
-        processing_start_timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
         summary_output_path = RESULTS_PATH / f"{file_path.stem}_processed.csv"
 
         # 👉 Choose processing function based on test_type
@@ -1552,10 +2029,7 @@ def initialise_lasing_processing(file_path, detection_time, test_type):
                 decoder_path=decoder_path,
                 sampling_freq=1,
             )
-            export_wafer_level_cod_summary(
-                wafer_code, machine_code, processing_start_timestamp, summary_output_path, RESULTS_PATH
-            )
-        if test_type == "Rollover":
+        elif test_type == "Rollover":
             print("⚙️ Rollover test detected, using standard processing function\n")
             stream_process_lasing_parameters(
                 file_path,
