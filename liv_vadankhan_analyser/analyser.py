@@ -994,7 +994,7 @@ def stream_process_lasing_parameters(
     summary_output_path,
     ini_data,
     decoder_path,
-    sampling_freq=1,
+    sampling_freq=10000,
     chunksize=10000,
     export_buffer=1000,
 ):
@@ -1016,6 +1016,7 @@ def stream_process_lasing_parameters(
     INI_STAGE = ini_data["INI_STAGE"]
     INI_STEP = ini_data["INI_STEP"]
     INI_PROD = ini_data["INI_PROD"]
+    product_code = INI_PROD
     INI_MACH = ini_data["INI_MACH"]
     machine_code = INI_MACH
     INI_EMPID = ini_data["INI_EMPID"]
@@ -1032,24 +1033,24 @@ def stream_process_lasing_parameters(
 
     columns_local = [
         "WAFER_ID",
-        "MACH",
+        "WAFER_TYPE",
+        "MACH_NUM",
+        "LIV_ANALYZER_VERSION",
         "TE_LABEL",
         "TOUCHDOWN",
-        "I_THRESHOLD",
-        "SLOPE_EFFICIENCY",
-        "SERIES_RESISTANCE",
-        "PEAK_WAVELENGTH_35mA",
+        "ITH_MA",
+        "SLOPE_EFF_MW_MA",
+        "RS_FIT_OHMS",
+        "PEAK_WAVE_AT35_NM",
         "SPD_CURRENT",
-        "KINK1",
-        "KNKPPD_BL",
-        "KNKKMM_BL",
-        "ILK_BL",
-        "RV_BL",
-        "FLD",
+        "KINK1_CURRENT_MA",
+        "LEAK_CURR_UA",
+        "REVERSE_VOLTS_V",
+        "CUBE_NUM",
         "TYPE",
-        "X_UM",
-        "Y_UM",
-        "FLAG",
+        "STX_WAFER_X_UM",
+        "STX_WAFER_Y_UM",
+        "FLAG_LOW_POUT",
     ]
 
     columns_levee = [
@@ -1114,7 +1115,7 @@ def stream_process_lasing_parameters(
                 no_laser_flag = flag_no_laser(intensity)
 
                 if no_laser_flag:
-                    flag = "NO LASER"
+                    flag = 1
                     ith = 0
                     slope_eff = 0
                     series_r = 0
@@ -1127,7 +1128,7 @@ def stream_process_lasing_parameters(
                     KNKPPD_BL = 0  # Dummy Values set in lieu of generation of these parameters that labview does
                     KNKKMM_BL = 0  # Dummy Values set in lieu of generation of these parameters that labview does
                 else:
-                    flag = np.nan
+                    flag = 0
                     ith = find_ith_value(intensity, current)
 
                     slope_eff = find_slope_efficiency(intensity, current, ith) if ith else 0
@@ -1148,7 +1149,9 @@ def stream_process_lasing_parameters(
                 summary_records.append(
                     [
                         wafer_code,
+                        product_code,
                         machine_code,
+                        f"py_v{VERSION}",
                         te_label,
                         touchdown,
                         ith,
@@ -1157,8 +1160,6 @@ def stream_process_lasing_parameters(
                         peak_wl,
                         spd_current,
                         kink_current,
-                        KNKPPD_BL,
-                        KNKKMM_BL,
                         leakage_current,
                         reverse_voltage,
                         cube_number,
@@ -1539,9 +1540,7 @@ def initialise_lasing_processing(file_path, detection_time, test_type):
             decoder_path = ROOT_DIR / "decoders" / SUBARU_DECODER
 
         processing_start_timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-        summary_output_path = (
-            RESULTS_PATH / f"{file_path.stem}_{ANALYSIS_RUN_NAME}v{VERSION}_{processing_start_timestamp}_processed.csv"
-        )
+        summary_output_path = RESULTS_PATH / f"{file_path.stem}_processed.csv"
 
         # 👉 Choose processing function based on test_type
         if test_type == "SPD":
@@ -1552,22 +1551,26 @@ def initialise_lasing_processing(file_path, detection_time, test_type):
                 ini_data=ini_dict,
                 decoder_path=decoder_path,
                 sampling_freq=1,
-                chunksize=10000,
-                export_buffer=1000,
             )
             export_wafer_level_cod_summary(
                 wafer_code, machine_code, processing_start_timestamp, summary_output_path, RESULTS_PATH
             )
-        else:
-            print("⚙️ Baseline test or default, using standard processing function\n")
+        if test_type == "Rollover":
+            print("⚙️ Rollover test detected, using standard processing function\n")
             stream_process_lasing_parameters(
                 file_path,
                 summary_output_path,
                 ini_data=ini_dict,
                 decoder_path=decoder_path,
                 sampling_freq=1,
-                chunksize=10000,
-                export_buffer=1000,
+            )
+        else:
+            print("⚙️ Baseline test or other, using default processing function\n")
+            stream_process_lasing_parameters(
+                file_path,
+                summary_output_path,
+                ini_data=ini_dict,
+                decoder_path=decoder_path,
             )
 
         with open(LOG_PATH, "a", encoding="utf-8") as log_file:
@@ -1613,7 +1616,7 @@ class WaferFileHandler(FileSystemEventHandler):
             test_type = extract_test_type_from_file(file_path)
             print(f"\nDetected Test Type: {test_type}")
 
-            if test_type in ("Rollover"):
+            if test_type not in ("Rollover", "Baseline", "SPD"):
                 message = f"Skipping analysis for test type '{test_type}' in: {file_path.name}"
                 print(message)
                 with open(LOG_PATH, "a", encoding="utf-8") as log_file:
@@ -1622,6 +1625,21 @@ class WaferFileHandler(FileSystemEventHandler):
                 return
 
             initialise_lasing_processing(file_path, detection_time, test_type)  # unpacks into rest of code
+
+            # ✅ Rename file after successful analysis
+            timestamp = datetime.now().strftime("RAW%Y%m%d%H%M%S")
+            new_name = file_path.stem.replace("STX", timestamp) + file_path.suffix
+            new_path = file_path.with_name(new_name)
+
+            try:
+                file_path.rename(new_path)
+                print(f"✅ Renamed file to: {new_path.name}")
+                with open(LOG_PATH, "a", encoding="utf-8") as log_file:
+                    log_file.write(f"[{detection_time}] ✅ Renamed to: {new_path.name}\n")
+            except Exception as e:
+                print(f"❌ Failed to rename file: {e}")
+                with open(LOG_PATH, "a", encoding="utf-8") as log_file:
+                    log_file.write(f"[{detection_time}] ❌ Rename failed: {e}\n")
 
             print_watcher_banner()
 
