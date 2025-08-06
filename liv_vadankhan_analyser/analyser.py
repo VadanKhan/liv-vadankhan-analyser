@@ -2,6 +2,7 @@ import sys
 import time
 import os
 import traceback
+import io
 from pathlib import Path
 import configparser
 from datetime import datetime
@@ -679,7 +680,7 @@ def find_kink(
     L_raw = intensity[idx_start:]
     V = voltage[idx_start:]
 
-    if len(L_raw) < trim_boundary_points + 1:
+    if len(L_raw) < trim_boundary_points + 4:
         print("Warning: Not enough points after Ith for analysis.")
         return {
             "kink_current": 0,
@@ -946,7 +947,7 @@ def find_kink_fast_spd(
 
     # -------------- Hardcoded Trimming of Boundary Points -------------- #
     n_points = len(I_non_spd)
-    if n_points < trim_boundary_points + trim_end_points + 1:
+    if n_points < trim_boundary_points + trim_end_points + 4:
         # print("Warning: Not enough points after trimming for fit.")
         return {
             "kink_current": 0,
@@ -1956,6 +1957,100 @@ def load_ini_data(ini_path):
 
 
 # ------------------------------------------------------------------ #
+#                            Logging Code                            #
+# ------------------------------------------------------------------ #
+class TeeLogger:
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, message):
+        for s in self.streams:
+            s.write(message)
+            s.flush()
+
+    def flush(self):
+        for s in self.streams:
+            s.flush()
+
+
+def initialise_lasing_processing_logging(file_path, detection_time, test_type):
+    ini_dict = load_ini_data(INI_LOCATION)
+    INI_MACH = ini_dict["INI_MACH"]
+    INI_LOT = ini_dict["INI_LOT"]
+    wafer_code = INI_LOT  # just for readability
+    PRODUCT_TYPE = ini_dict["PRODUCT_TYPE"]
+
+    # Capture all print and tqdm.write output
+    buffer = io.StringIO()
+    tee_out = TeeLogger(sys.__stdout__, buffer)
+    tee_err = TeeLogger(sys.__stderr__, buffer)
+
+    sys.stdout = tee_out
+    sys.stderr = tee_err
+
+    try:
+        print(f"Fetched Info (from {INI_NAME}): Wafer Code - {INI_LOT}, Machine Code - {INI_MACH}\n")
+
+        if wafer_code:
+            if PRODUCT_TYPE == "HALO":
+                print("Halo Wafer Detected, using Halo Decoder\n")
+                decoder_path = ROOT_DIR / "decoders" / HALO_DECODER
+            else:
+                print("Non-Halo Wafer Detected, Using Subaru Decoder\n")
+                decoder_path = ROOT_DIR / "decoders" / SUBARU_DECODER
+
+            summary_output_path = RESULTS_PATH / f"{file_path.stem}_processed.csv"
+
+            # 👉 Choose processing function based on test_type
+            if test_type == "SPD":
+                print("⚙️ SPD test detected, using COD processing function\n")
+                stream_process_lasing_parameters_cod(
+                    file_path,
+                    summary_output_path,
+                    ini_data=ini_dict,
+                    decoder_path=decoder_path,
+                    sampling_freq=1,
+                )
+            elif test_type == "Rollover":
+                print("⚙️ Rollover test detected, using standard processing function\n")
+                stream_process_lasing_parameters(
+                    file_path,
+                    summary_output_path,
+                    ini_data=ini_dict,
+                    decoder_path=decoder_path,
+                    sampling_freq=1,
+                )
+            else:
+                print("⚙️ Baseline test or other, using default processing function\n")
+                stream_process_lasing_parameters(
+                    file_path,
+                    summary_output_path,
+                    ini_data=ini_dict,
+                    decoder_path=decoder_path,
+                )
+
+            # ✅ Log after processing
+            with open(LOG_PATH, "a", encoding="utf-8") as log_file:
+                log_file.write(f"\n\n========== Wafer: {wafer_code} ==========\n")
+                log_file.write(f"[{detection_time}] ✅ Processed: {file_path.name} (Wafer: {wafer_code})\n")
+                log_file.write("---- Processing Output ----\n")
+                log_file.write(buffer.getvalue())
+                log_file.write("---- End of Output ----\n\n")
+
+        else:
+            message = f"No valid wafer code found in folder: {file_path.parent.name}"
+            print(message)
+            with open(LOG_PATH, "a", encoding="utf-8") as log_file:
+                log_file.write(f"\n\n========== Wafer: UNKNOWN ==========\n")
+                log_file.write(f"[{detection_time}] ❌ {message}\n")
+
+    finally:
+        # Always restore stdout/stderr
+        sys.stdout = sys.__stdout__
+        sys.stderr = sys.__stderr__
+
+
+# ------------------------------------------------------------------ #
 #                      Watchdog Triggering Code                      #
 # ------------------------------------------------------------------ #
 def wait_for_file_to_appear_and_be_readable(filepath, max_wait=300, delay=1):
@@ -2048,11 +2143,13 @@ def initialise_lasing_processing(file_path, detection_time, test_type):
             )
 
         with open(LOG_PATH, "a", encoding="utf-8") as log_file:
+            log_file.write(f"\n\n========== Wafer: {wafer_code} ==========\n")
             log_file.write(f"[{detection_time}] ✅ Processed: {file_path.name} (Wafer: {wafer_code})\n")
     else:
         message = f"No valid wafer code found in folder: {file_path.parent.name}"
         print(message)
         with open(LOG_PATH, "a", encoding="utf-8") as log_file:
+            log_file.write(f"\n\n========== Wafer: {wafer_code} ==========\n")
             log_file.write(f"[{detection_time}] ❌ {message}\n")
 
 
@@ -2098,7 +2195,7 @@ class WaferFileHandler(FileSystemEventHandler):
                 print_watcher_banner()
                 return
 
-            initialise_lasing_processing(file_path, detection_time, test_type)  # unpacks into rest of code
+            initialise_lasing_processing_logging(file_path, detection_time, test_type)  # unpacks into rest of code
 
             # ✅ Rename file after successful analysis
             timestamp = datetime.now().strftime("RAW%Y%m%d%H%M%S")
