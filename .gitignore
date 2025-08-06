@@ -3,3 +3,6 @@
 decoders/
 exports/
 validation/
+results/
+monitored_folder/
+levee_folder/

@@ -20,6 +20,7 @@ dependencies = [
     "plotly>=6.1.2",
     "nbformat>=5.10.4",
     "tqdm>=4.67.1",
+    "watchdog>=6.0.0",
 ]
 requires-python = "<3.12,>=3.11"
 readme = "README.md"
