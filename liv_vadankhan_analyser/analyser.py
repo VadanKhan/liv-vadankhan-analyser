@@ -3,8 +3,10 @@ import time
 import os
 import traceback
 import io
-from pathlib import Path
 import configparser
+import shutil
+import subprocess
+from pathlib import Path
 from datetime import datetime
 
 import pandas as pd
@@ -21,25 +23,36 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 import threading
 
-
 CURRENT_DIR = Path(os.getcwd())
 ROOT_DIR = CURRENT_DIR  # Adjust the number based on your folder structure
 sys.path.append(str(ROOT_DIR))  # Add the root directory to the system path
+
+
+# ------------------------------------------------------------------------------------------------ #
+#                                        PATH CONFIGURATIONS                                       #
+# ------------------------------------------------------------------------------------------------ #
+SUBARU_DECODER = "QC WAFER_LAYOUT 24Dec.csv"
+HALO_DECODER = "HALO_DECODER_NE-rev1_1 logic_coords_annotated.csv"
 
 EXPORTS_FILEPATH = ROOT_DIR / "exports"
 if not os.path.exists(EXPORTS_FILEPATH):
     os.makedirs(EXPORTS_FILEPATH)
 
+MONITORED_PATH = ROOT_DIR / "monitored_folder"
+
 RESULTS_PATH = ROOT_DIR / "results"
 if not os.path.exists(RESULTS_PATH):
     os.makedirs(RESULTS_PATH)
 
-SUBARU_DECODER = "QC WAFER_LAYOUT 24Dec.csv"
-HALO_DECODER = "HALO_DECODER_NE-rev1_1 logic_coords_annotated.csv"
-MONITORED_PATH = ROOT_DIR / "monitored_folder"
-LOG_PATH = RESULTS_PATH / "detection_log.txt"
 INI_NAME = "PROBEINF.ini"
 INI_LOCATION = ROOT_DIR / "dummy_location" / INI_NAME
+
+LEVEE_FOLDER = ROOT_DIR / "levee_folder"
+LEVEE_EXE_PATH = Path("C:/path/to/levee_handler.exe")
+
+LOG_NAME = "detection_log.txt"
+LOG_PATH = RESULTS_PATH / LOG_NAME
+
 ANALYSIS_RUN_NAME = "python"  # Replace or parameterize as needed
 VERSION = 1.0
 
@@ -1935,7 +1948,7 @@ def extract_test_type_from_file(file_path):
 
 
 # 🔁 Processing triggering
-def initialise_lasing_processing(file_path, ini_dict, test_type, detection_time):
+def initialise_lasing_processing(file_path, ini_dict, test_type, gtx_output_path, levee_output_path):
     INI_MACH = ini_dict["INI_MACH"]
     INI_LOT = ini_dict["INI_LOT"]
     wafer_code = INI_LOT  # just for readability
@@ -1950,9 +1963,6 @@ def initialise_lasing_processing(file_path, ini_dict, test_type, detection_time)
         else:
             tqdm.write("Non-Halo Wafer Detected, Using Subaru Decoder\n")
             decoder_path = ROOT_DIR / "decoders" / SUBARU_DECODER
-
-        gtx_output_path = RESULTS_PATH / f"{file_path.stem}_processed.csv"
-        levee_output_path = RESULTS_PATH / f"{wafer_code}_{detection_time}.dat"
 
         # 👉 Choose processing function based on test_type
         if test_type == "SPD":
@@ -2041,13 +2051,36 @@ class WaferFileHandler(FileSystemEventHandler):
                     return
 
                 ini_dict = load_ini_data(INI_LOCATION)
+                INI_LOT = ini_dict["INI_LOT"]
+                wafer_code = INI_LOT  # just for readability
+
+                gtx_output_path = RESULTS_PATH / f"{file_path.stem}_processed.csv"
+                levee_output_name = RESULTS_PATH / f"{wafer_code}_{detection_time_raw}.dat"
+
                 initialise_lasing_processing(
-                    file_path, ini_dict, test_type, detection_time=detection_time_raw
+                    file_path, ini_dict, test_type, gtx_output_path, levee_output_name
                 )  # unpacks into rest of code
 
                 # ----------------- case statement for last recipe --> shunting + triggering levee ----------------- #
                 if ini_dict["INI_MEAS_TYPE"] == ini_dict["INI_FINAL_RECIPE"]:
                     tqdm.write(f"\nFinal Recipe Detected, Engaging Levee Protocol:\n")
+
+                    # Find all .dat files in RESULTS_PATH with matching wafer_code prefix
+                    matching_dat_files = list(RESULTS_PATH.glob(f"{wafer_code}_*.dat"))
+
+                    for dat_file in matching_dat_files:
+                        try:
+                            target_path = LEVEE_FOLDER / dat_file.name
+                            shutil.move(str(dat_file), target_path)
+                            tqdm.write(f"🔀 Moved {dat_file.name} → {target_path}")
+                        except Exception as e:
+                            tqdm.write(f"❌ Failed to move {dat_file.name}: {e}")
+
+                    try:
+                        subprocess.run([str(LEVEE_EXE_PATH)], check=True)
+                        tqdm.write(f"🚀 Successfully triggered Levee executable: {LEVEE_EXE_PATH}")
+                    except Exception as e:
+                        tqdm.write(f"❌ Failed to trigger Levee executable: {e}")
                 # ------------------------------------ end of last recipe case ----------------------------------- #
 
                 # ✅ Rename file after successful analysis
@@ -2057,10 +2090,10 @@ class WaferFileHandler(FileSystemEventHandler):
 
                 try:
                     file_path.rename(new_path)
-                    tqdm.write(f"✅ Renamed file to: {new_path.name}")
+                    tqdm.write(f"\n✅ Renamed file to: {new_path.name}")
                     tqdm.write(f"[{detection_time}] ✅ Renamed to: {new_path.name}\n")
                 except Exception as e:
-                    tqdm.write(f"❌ Failed to rename file: {e}")
+                    tqdm.write(f"\n❌ Failed to rename file: {e}")
                     tqdm.write(f"[{detection_time}] ❌ Rename failed: {e}\n")
 
                 success = True  # Mark success if all above runs without fatal errors
