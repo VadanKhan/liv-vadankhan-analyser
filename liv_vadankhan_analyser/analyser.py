@@ -1936,6 +1936,7 @@ def load_ini_data(ini_path):
         "INI_PDATETIME": pdatetime,
         "INI_XDIVIDING_FACTOR": int(setup_info_dict["xdiesize"]),
         "INI_YDIVIDING_FACTOR": int(setup_info_dict["ydiesize"]),
+        "INI_FINAL_RECIPE": setup_info_dict["final_recipe"],
         "FAC": "STST",
         "CARD": 0,
         "COND": "Py_v1.0",
@@ -1971,83 +1972,6 @@ class TeeLogger:
     def flush(self):
         for s in self.streams:
             s.flush()
-
-
-def initialise_lasing_processing_logging(file_path, detection_time, test_type):
-    ini_dict = load_ini_data(INI_LOCATION)
-    INI_MACH = ini_dict["INI_MACH"]
-    INI_LOT = ini_dict["INI_LOT"]
-    wafer_code = INI_LOT  # just for readability
-    PRODUCT_TYPE = ini_dict["PRODUCT_TYPE"]
-
-    # Capture all print and tqdm.write output
-    buffer = io.StringIO()
-    tee_out = TeeLogger(sys.__stdout__, buffer)
-    tee_err = TeeLogger(sys.__stderr__, buffer)
-
-    sys.stdout = tee_out
-    sys.stderr = tee_err
-
-    try:
-        print(f"Fetched Info (from {INI_NAME}): Wafer Code - {INI_LOT}, Machine Code - {INI_MACH}\n")
-
-        if wafer_code:
-            if PRODUCT_TYPE == "HALO":
-                print("Halo Wafer Detected, using Halo Decoder\n")
-                decoder_path = ROOT_DIR / "decoders" / HALO_DECODER
-            else:
-                print("Non-Halo Wafer Detected, Using Subaru Decoder\n")
-                decoder_path = ROOT_DIR / "decoders" / SUBARU_DECODER
-
-            summary_output_path = RESULTS_PATH / f"{file_path.stem}_processed.csv"
-
-            # 👉 Choose processing function based on test_type
-            if test_type == "SPD":
-                print("⚙️ SPD test detected, using COD processing function\n")
-                stream_process_lasing_parameters_cod(
-                    file_path,
-                    summary_output_path,
-                    ini_data=ini_dict,
-                    decoder_path=decoder_path,
-                    sampling_freq=1,
-                )
-            elif test_type == "Rollover":
-                print("⚙️ Rollover test detected, using standard processing function\n")
-                stream_process_lasing_parameters(
-                    file_path,
-                    summary_output_path,
-                    ini_data=ini_dict,
-                    decoder_path=decoder_path,
-                    sampling_freq=1,
-                )
-            else:
-                print("⚙️ Baseline test or other, using default processing function\n")
-                stream_process_lasing_parameters(
-                    file_path,
-                    summary_output_path,
-                    ini_data=ini_dict,
-                    decoder_path=decoder_path,
-                )
-
-            # ✅ Log after processing
-            with open(LOG_PATH, "a", encoding="utf-8") as log_file:
-                log_file.write(f"\n\n========== Wafer: {wafer_code} ==========\n")
-                log_file.write(f"[{detection_time}] ✅ Processed: {file_path.name} (Wafer: {wafer_code})\n")
-                log_file.write("---- Processing Output ----\n")
-                log_file.write(buffer.getvalue())
-                log_file.write("---- End of Output ----\n\n")
-
-        else:
-            message = f"No valid wafer code found in folder: {file_path.parent.name}"
-            print(message)
-            with open(LOG_PATH, "a", encoding="utf-8") as log_file:
-                log_file.write(f"\n\n========== Wafer: UNKNOWN ==========\n")
-                log_file.write(f"[{detection_time}] ❌ {message}\n")
-
-    finally:
-        # Always restore stdout/stderr
-        sys.stdout = sys.__stdout__
-        sys.stderr = sys.__stderr__
 
 
 # ------------------------------------------------------------------ #
@@ -2095,28 +2019,27 @@ def extract_test_type_from_file(file_path):
 
 
 # 🔁 Processing triggering
-def initialise_lasing_processing(file_path, detection_time, test_type):
-    ini_dict = load_ini_data(INI_LOCATION)
+def initialise_lasing_processing(file_path, ini_dict, detection_time, test_type):
     INI_MACH = ini_dict["INI_MACH"]
     INI_LOT = ini_dict["INI_LOT"]
     wafer_code = INI_LOT  # just for readability
     PRODUCT_TYPE = ini_dict["PRODUCT_TYPE"]
 
-    print(f"Fetched Info (from {INI_NAME}): Wafer Code - {INI_LOT}, Machine Code - {INI_MACH}\n")
+    tqdm.write(f"Fetched Info (from {INI_NAME}): Wafer Code - {INI_LOT}, Machine Code - {INI_MACH}\n")
 
     if wafer_code:
         if PRODUCT_TYPE == "HALO":
-            print("Halo Wafer Detected, using Halo Decoder\n")
+            tqdm.write("Halo Wafer Detected, using Halo Decoder\n")
             decoder_path = ROOT_DIR / "decoders" / HALO_DECODER
         else:
-            print("Non-Halo Wafer Detected, Using Subaru Decoder\n")
+            tqdm.write("Non-Halo Wafer Detected, Using Subaru Decoder\n")
             decoder_path = ROOT_DIR / "decoders" / SUBARU_DECODER
 
         summary_output_path = RESULTS_PATH / f"{file_path.stem}_processed.csv"
 
         # 👉 Choose processing function based on test_type
         if test_type == "SPD":
-            print("⚙️ SPD test detected, using COD processing function\n")
+            tqdm.write("⚙️ SPD test detected, using COD processing function\n")
             stream_process_lasing_parameters_cod(
                 file_path,
                 summary_output_path,
@@ -2125,7 +2048,7 @@ def initialise_lasing_processing(file_path, detection_time, test_type):
                 sampling_freq=1,
             )
         elif test_type == "Rollover":
-            print("⚙️ Rollover test detected, using standard processing function\n")
+            tqdm.write("⚙️ Rollover test detected, using standard processing function\n")
             stream_process_lasing_parameters(
                 file_path,
                 summary_output_path,
@@ -2134,7 +2057,7 @@ def initialise_lasing_processing(file_path, detection_time, test_type):
                 sampling_freq=1,
             )
         else:
-            print("⚙️ Baseline test or other, using default processing function\n")
+            tqdm.write("⚙️ Baseline test or other, using default processing function\n")
             stream_process_lasing_parameters(
                 file_path,
                 summary_output_path,
@@ -2142,21 +2065,17 @@ def initialise_lasing_processing(file_path, detection_time, test_type):
                 decoder_path=decoder_path,
             )
 
-        with open(LOG_PATH, "a", encoding="utf-8") as log_file:
-            log_file.write(f"\n\n========== Wafer: {wafer_code} ==========\n")
-            log_file.write(f"[{detection_time}] ✅ Processed: {file_path.name} (Wafer: {wafer_code})\n")
     else:
         message = f"No valid wafer code found in folder: {file_path.parent.name}"
-        print(message)
-        with open(LOG_PATH, "a", encoding="utf-8") as log_file:
-            log_file.write(f"\n\n========== Wafer: {wafer_code} ==========\n")
-            log_file.write(f"[{detection_time}] ❌ {message}\n")
+        tqdm.write(message)
+        tqdm.write(f"\n\n========== Wafer: UNKNOWN ==========\n")
+        tqdm.write(f"[{detection_time}] ❌ {message}\n")
 
 
 def print_watcher_banner():
-    print(f"\n\n# --------------------------- LIV Automatic Analyser v{VERSION} -------------------------- #")
-    print("(Do not close this command window)")
-    print(f"Watching folder: {MONITORED_PATH}\n")
+    tqdm.write(f"\n\n# --------------------------- LIV Automatic Analyser v{VERSION} -------------------------- #")
+    tqdm.write("(Do not close this command window)")
+    tqdm.write(f"Watching folder: {MONITORED_PATH}\n")
 
 
 print_watcher_banner()
@@ -2172,45 +2091,82 @@ class WaferFileHandler(FileSystemEventHandler):
             file_path = Path(event.src_path)
             detection_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-            with open(LOG_PATH, "a", encoding="utf-8") as log_file:
-                log_file.write(f"[{detection_time}] Detected new file: {file_path.name}\n")
+            # ---------- Wrap the following code in a buffer that ensures output is appended to logs --------- #
+            buffer = io.StringIO()
+            tee_out = TeeLogger(sys.__stdout__, buffer)
+            tee_err = TeeLogger(sys.__stderr__, buffer)
 
-            print(f"\nDetected new CSV file: {file_path.name}")
-
-            if not wait_for_file_to_appear_and_be_readable(file_path):
-                message = f"{file_path.name} did not become readable."
-                print(message)
-                with open(LOG_PATH, "a", encoding="utf-8") as log_file:
-                    log_file.write(f"[{detection_time}] ❌ {message}\n")
-                return
-
-            test_type = extract_test_type_from_file(file_path)
-            print(f"\nDetected Test Type: {test_type}")
-
-            if test_type not in ("Rollover", "Baseline", "SPD"):
-                message = f"Skipping analysis for test type '{test_type}' in: {file_path.name}"
-                print(message)
-                with open(LOG_PATH, "a", encoding="utf-8") as log_file:
-                    log_file.write(f"[{detection_time}] ⚠️ {message}\n")
-                print_watcher_banner()
-                return
-
-            initialise_lasing_processing_logging(file_path, detection_time, test_type)  # unpacks into rest of code
-
-            # ✅ Rename file after successful analysis
-            timestamp = datetime.now().strftime("RAW%Y%m%d%H%M%S")
-            new_name = file_path.stem.replace("STX", timestamp) + file_path.suffix
-            new_path = file_path.with_name(new_name)
+            sys.stdout = tee_out
+            sys.stderr = tee_err
 
             try:
-                file_path.rename(new_path)
-                print(f"✅ Renamed file to: {new_path.name}")
-                with open(LOG_PATH, "a", encoding="utf-8") as log_file:
-                    log_file.write(f"[{detection_time}] ✅ Renamed to: {new_path.name}\n")
+                tqdm.write(f"[{detection_time}] Detected new file: {file_path.name}\n")
+
+                if not wait_for_file_to_appear_and_be_readable(file_path):
+                    message = f"{file_path.name} did not become readable."
+                    tqdm.write(message)
+                    with open(LOG_PATH, "a", encoding="utf-8") as log_file:
+                        log_file.write(f"[{detection_time}] ❌ {message}\n")
+                    return
+
+                test_type = extract_test_type_from_file(file_path)
+                tqdm.write(f"\nDetected Test Type: {test_type}")
+
+                if test_type not in ("Rollover", "Baseline", "SPD"):
+                    message = f"Skipping analysis for test type '{test_type}' in: {file_path.name}"
+                    tqdm.write(message)
+                    tqdm.write(f"[{detection_time}] ⚠️ {message}\n")
+                    print_watcher_banner()
+                    return
+
+                ini_dict = load_ini_data(INI_LOCATION)
+                initialise_lasing_processing(
+                    file_path, ini_dict, detection_time, test_type
+                )  # unpacks into rest of code
+
+                # tqdm.write(f"Recipe: {ini_dict['INI_MEAS_TYPE']} = Final Recipe: {ini_dict['INI_FINAL_RECIPE']}")
+                if ini_dict["INI_MEAS_TYPE"] == ini_dict["INI_FINAL_RECIPE"]:
+                    tqdm.write(f"\nFinal Recipe Detected, Engaging Levee Protocol:\n")
+
+                # ✅ Rename file after successful analysis
+                timestamp = datetime.now().strftime("RAW%Y%m%d%H%M%S")
+                new_name = file_path.stem.replace("STX", timestamp) + file_path.suffix
+                new_path = file_path.with_name(new_name)
+
+                try:
+                    file_path.rename(new_path)
+                    tqdm.write(f"✅ Renamed file to: {new_path.name}")
+                    tqdm.write(f"[{detection_time}] ✅ Renamed to: {new_path.name}\n")
+                except Exception as e:
+                    tqdm.write(f"❌ Failed to rename file: {e}")
+                    tqdm.write(f"[{detection_time}] ❌ Rename failed: {e}\n")
+
+                success = True  # Mark success if all above runs without fatal errors
+
             except Exception as e:
-                print(f"❌ Failed to rename file: {e}")
+                error_message = str(e)
+                tqdm.write(f"❌ Error while processing file: {e}")
+                traceback.print_exc(file=buffer)  # Include full traceback in log
+
+            finally:
+                # ✅ Write final log
                 with open(LOG_PATH, "a", encoding="utf-8") as log_file:
-                    log_file.write(f"[{detection_time}] ❌ Rename failed: {e}\n")
+                    lot = ini_dict.get("INI_LOT", "UNKNOWN")
+                    log_file.write(f"\n\n========== Wafer: {lot} ==========\n")
+                    if success:
+                        log_file.write(f"[{detection_time}] ✅ Processed: {file_path.name} (Wafer: {lot})\n")
+                    else:
+                        log_file.write(f"[{detection_time}] ❌ Failed to process: {file_path.name} (Wafer: {lot})\n")
+                        if error_message:
+                            log_file.write(f"Reason: {error_message}\n")
+                    log_file.write("\n\n---- Processing Output ----\n")
+                    log_file.write(buffer.getvalue())
+                    log_file.write("---- End of Output ----\n\n")
+
+                # Always restore stdout/stderr
+                sys.stdout = sys.__stdout__
+                sys.stderr = sys.__stderr__
+            # ---------------------------------- end of log output wrapping ---------------------------------- #
 
             print_watcher_banner()
 
