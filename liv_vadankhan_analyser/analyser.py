@@ -1205,6 +1205,7 @@ def transform_raw_liv_file_every_nth_laser_chunked(
 def stream_process_lasing_parameters(
     filepath,
     summary_output_path,
+    dat_output_path,
     ini_data,
     decoder_path,
     sampling_freq=10000,
@@ -1215,7 +1216,6 @@ def stream_process_lasing_parameters(
     accumulator = {}
     summary_records = []
     melted_records = []
-    dat_output_path = Path(summary_output_path).with_suffix(".dat")
     dat_file_exists = dat_output_path.exists()
     total_processed = 0  # 👈 Counter for total exported rows
     total_exported_rows = 0  # 👈 Counter for total exported rows
@@ -1472,6 +1472,7 @@ def stream_process_lasing_parameters(
 def stream_process_lasing_parameters_cod(
     filepath,
     summary_output_path,
+    dat_output_path,
     ini_data,
     decoder_path,
     sampling_freq=10000,
@@ -1482,7 +1483,6 @@ def stream_process_lasing_parameters_cod(
     accumulator = {}
     summary_records = []
     melted_records = []
-    dat_output_path = Path(summary_output_path).with_suffix(".dat")
     dat_file_exists = dat_output_path.exists()
     total_processed = 0  # 👈 Counter for total exported rows
     total_exported_rows = 0  # 👈 Counter for total exported rows
@@ -1736,90 +1736,6 @@ def stream_process_lasing_parameters_cod(
     tqdm.write(f"✓ Device summary exported for {wafer_code}")
 
 
-def stream_process_lasing_parameters_cod_localbuild(
-    filepath,
-    device_summary_path,
-    ini_data,
-    decoder_path,
-    sampling_freq=1,
-    chunksize=10000,
-    export_buffer=10000,
-):
-
-    accumulator = {}
-    summary_records = []
-
-    # ⬇️ Unpack ini_data dictionary
-    INI_LOT = ini_data["INI_LOT"]
-    wafer_code = INI_LOT
-    INI_MACH = ini_data["INI_MACH"]
-    machine_code = INI_MACH
-
-    for transformed_data in transform_raw_liv_file_every_nth_laser_chunked(
-        filepath, decoder_path, machine_code, wafer_code, sampling_freq, chunksize
-    ):
-        chunk = transformed_data["chunk"]
-        n_meas = transformed_data["n_meas"]
-
-        grouped = chunk.groupby("TE_LABEL")
-
-        for te_label, group in grouped:
-            if te_label not in accumulator:
-                accumulator[te_label] = [group]
-            else:
-                accumulator[te_label].append(group)
-
-            if sum(len(g) for g in accumulator[te_label]) >= n_meas:
-                full_data = pd.concat(accumulator[te_label], ignore_index=True)
-
-                touchdown = full_data["TOUCHDOWN"].iloc[0] if "TOUCHDOWN" in full_data else ""
-
-                current = full_data["LDI_mA"].values
-                intensity = full_data["PD"].values
-                voltage = full_data["Vf"].values
-                no_laser_flag = flag_no_laser(intensity)
-
-                if no_laser_flag:
-                    flag = "NO LASER"
-                else:
-                    flag = np.nan
-
-                # ith = find_ith_value_labview(intensity, current)
-                result = find_spd(current, intensity, voltage, no_laser_flag)
-
-                record = {
-                    "WAFER_ID": wafer_code,
-                    "MACH": full_data["MACH"].iloc[0] if "MACH" in full_data else "",
-                    "TE_LABEL": te_label,
-                    "TOUCHDOWN": touchdown,
-                    "TYPE": full_data["TYPE"].iloc[0],
-                    "X_UM": full_data["X_UM"].iloc[0],
-                    "Y_UM": full_data["Y_UM"].iloc[0],
-                    "FLAG": flag,
-                    **result.to_dict(),  # Insert the SPD-related results here
-                }
-                summary_records.append(record)
-
-                del accumulator[te_label]
-
-                # buffered flush
-                if len(summary_records) >= export_buffer:
-                    # print(f"\nSummary Records:\n {summary_records}\n")
-                    pd.DataFrame(summary_records).to_csv(
-                        Path(device_summary_path), mode="a", header=not device_summary_path.exists(), index=False
-                    )
-                    summary_records.clear()
-
-    # Final flush
-    tqdm.write(f"Data Exporting to: {device_summary_path}")
-    if summary_records:
-        pd.DataFrame(summary_records).to_csv(
-            device_summary_path, mode="a", header=not device_summary_path.exists(), index=False
-        )
-
-    tqdm.write(f"✓ Device summary exported for {wafer_code}\n\n")
-
-
 def export_wafer_level_cod_summary(
     wafer_code,
     machine_code,
@@ -2019,7 +1935,7 @@ def extract_test_type_from_file(file_path):
 
 
 # 🔁 Processing triggering
-def initialise_lasing_processing(file_path, ini_dict, detection_time, test_type):
+def initialise_lasing_processing(file_path, ini_dict, test_type, detection_time):
     INI_MACH = ini_dict["INI_MACH"]
     INI_LOT = ini_dict["INI_LOT"]
     wafer_code = INI_LOT  # just for readability
@@ -2035,14 +1951,16 @@ def initialise_lasing_processing(file_path, ini_dict, detection_time, test_type)
             tqdm.write("Non-Halo Wafer Detected, Using Subaru Decoder\n")
             decoder_path = ROOT_DIR / "decoders" / SUBARU_DECODER
 
-        summary_output_path = RESULTS_PATH / f"{file_path.stem}_processed.csv"
+        gtx_output_path = RESULTS_PATH / f"{file_path.stem}_processed.csv"
+        levee_output_path = RESULTS_PATH / f"{wafer_code}_{detection_time}.dat"
 
         # 👉 Choose processing function based on test_type
         if test_type == "SPD":
             tqdm.write("⚙️ SPD test detected, using COD processing function\n")
             stream_process_lasing_parameters_cod(
                 file_path,
-                summary_output_path,
+                summary_output_path=gtx_output_path,
+                dat_output_path=levee_output_path,
                 ini_data=ini_dict,
                 decoder_path=decoder_path,
                 sampling_freq=1,
@@ -2051,7 +1969,8 @@ def initialise_lasing_processing(file_path, ini_dict, detection_time, test_type)
             tqdm.write("⚙️ Rollover test detected, using standard processing function\n")
             stream_process_lasing_parameters(
                 file_path,
-                summary_output_path,
+                summary_output_path=gtx_output_path,
+                dat_output_path=levee_output_path,
                 ini_data=ini_dict,
                 decoder_path=decoder_path,
                 sampling_freq=1,
@@ -2060,7 +1979,8 @@ def initialise_lasing_processing(file_path, ini_dict, detection_time, test_type)
             tqdm.write("⚙️ Baseline test or other, using default processing function\n")
             stream_process_lasing_parameters(
                 file_path,
-                summary_output_path,
+                summary_output_path=gtx_output_path,
+                dat_output_path=levee_output_path,
                 ini_data=ini_dict,
                 decoder_path=decoder_path,
             )
@@ -2069,7 +1989,7 @@ def initialise_lasing_processing(file_path, ini_dict, detection_time, test_type)
         message = f"No valid wafer code found in folder: {file_path.parent.name}"
         tqdm.write(message)
         tqdm.write(f"\n\n========== Wafer: UNKNOWN ==========\n")
-        tqdm.write(f"[{detection_time}] ❌ {message}\n")
+        tqdm.write(f"❌ {message}\n")
 
 
 def print_watcher_banner():
@@ -2090,6 +2010,7 @@ class WaferFileHandler(FileSystemEventHandler):
         def analysis_job():
             file_path = Path(event.src_path)
             detection_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            detection_time_raw = datetime.now().strftime("%Y%m%d%H%M%S")
 
             # ---------- Wrap the following code in a buffer that ensures output is appended to logs --------- #
             buffer = io.StringIO()
@@ -2121,12 +2042,13 @@ class WaferFileHandler(FileSystemEventHandler):
 
                 ini_dict = load_ini_data(INI_LOCATION)
                 initialise_lasing_processing(
-                    file_path, ini_dict, detection_time, test_type
+                    file_path, ini_dict, test_type, detection_time=detection_time_raw
                 )  # unpacks into rest of code
 
-                # tqdm.write(f"Recipe: {ini_dict['INI_MEAS_TYPE']} = Final Recipe: {ini_dict['INI_FINAL_RECIPE']}")
+                # ----------------- case statement for last recipe --> shunting + triggering levee ----------------- #
                 if ini_dict["INI_MEAS_TYPE"] == ini_dict["INI_FINAL_RECIPE"]:
                     tqdm.write(f"\nFinal Recipe Detected, Engaging Levee Protocol:\n")
+                # ------------------------------------ end of last recipe case ----------------------------------- #
 
                 # ✅ Rename file after successful analysis
                 timestamp = datetime.now().strftime("RAW%Y%m%d%H%M%S")
