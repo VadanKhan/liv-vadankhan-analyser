@@ -8,6 +8,7 @@ import shutil
 import subprocess
 from pathlib import Path
 from datetime import datetime
+import threading
 
 import pandas as pd
 import numpy as np
@@ -21,7 +22,7 @@ from sklearn.linear_model import RANSACRegressor, LinearRegression
 from tqdm import tqdm
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
-import threading
+
 
 CURRENT_DIR = Path(os.getcwd())
 ROOT_DIR = CURRENT_DIR  # Adjust the number based on your folder structure
@@ -31,30 +32,22 @@ sys.path.append(str(ROOT_DIR))  # Add the root directory to the system path
 # ------------------------------------------------------------------------------------------------ #
 #                                        PATH CONFIGURATIONS                                       #
 # ------------------------------------------------------------------------------------------------ #
-SUBARU_DECODER = "QC WAFER_LAYOUT 24Dec.csv"
-HALO_DECODER = "HALO_DECODER_NE-rev1_1 logic_coords_annotated.csv"
-
-EXPORTS_FILEPATH = ROOT_DIR / "exports"
-if not os.path.exists(EXPORTS_FILEPATH):
-    os.makedirs(EXPORTS_FILEPATH)
-
-MONITORED_PATH = ROOT_DIR / "monitored_folder"
-
-RESULTS_PATH = ROOT_DIR / "results"
-if not os.path.exists(RESULTS_PATH):
-    os.makedirs(RESULTS_PATH)
-
-INI_NAME = "PROBEINF.ini"
-INI_LOCATION = ROOT_DIR / "dummy_location" / INI_NAME
-
-LEVEE_FOLDER = ROOT_DIR / "levee_folder"
-LEVEE_EXE_PATH = Path("C:/path/to/levee_handler.exe")
-
-LOG_NAME = "detection_log.txt"
-LOG_PATH = RESULTS_PATH / LOG_NAME
-
-ANALYSIS_RUN_NAME = "python"  # Replace or parameterize as needed
-VERSION = 1.0
+from config import (
+    CURRENT_DIR,
+    ROOT_DIR,
+    SUBARU_DECODER,
+    HALO_DECODER,
+    MONITORED_PATH,
+    GTX_RESULTS_PATH,
+    LEVEE_RESULTS_PATH,
+    INI_NAME,
+    INI_LOCATION,
+    LEVEE_FOLDER,
+    LEVEE_EXE_PATH,
+    LOG_NAME,
+    LOG_PATH,
+    VERSION,
+)
 
 
 # ------------------------------------------------------------------ #
@@ -1220,8 +1213,9 @@ def stream_process_lasing_parameters(
     summary_output_path,
     dat_output_path,
     ini_data,
+    test_type,
     decoder_path,
-    sampling_freq=10000,
+    sampling_freq=1,
     chunksize=10000,
     export_buffer=1000,
 ):
@@ -1396,17 +1390,23 @@ def stream_process_lasing_parameters(
                     ]
                 )
 
+                # Map test types to suffixes
+                suffix_map = {"Baseline": "_BL", "Rollover": "_COD70", "SPD": "_COD250"}
+
+                # Pick suffix based on test_type, default to _BL if unknown
+                suffix = suffix_map.get(test_type, "_BL")
+
                 melted_entries = [
-                    ("ITH_BL", ith),
-                    ("SE_BL", slope_eff),
-                    ("RS_BL", series_r),
-                    ("PW_BL", peak_wl),
-                    ("ISPD_BL", spd_current),
-                    ("KNK1_BL", kink_current),
-                    ("KNKPPD_BL", KNKPPD_BL),
-                    ("KNKMM_BL", KNKKMM_BL),
-                    ("ILK_BL", leakage_current),
-                    ("RV_BL", reverse_voltage),
+                    (f"ITH{suffix}", ith),
+                    (f"SE{suffix}", slope_eff),
+                    (f"RS{suffix}", series_r),
+                    (f"PW{suffix}", peak_wl),
+                    (f"ISPD{suffix}", spd_current),
+                    (f"KNK1{suffix}", kink_current),
+                    (f"KNKPPD{suffix}", KNKPPD_BL),
+                    (f"KNKMM{suffix}", KNKKMM_BL),
+                    (f"ILK{suffix}", leakage_current),
+                    (f"RV{suffix}", reverse_voltage),
                 ]
 
                 for param, val in melted_entries:
@@ -1487,8 +1487,9 @@ def stream_process_lasing_parameters_cod(
     summary_output_path,
     dat_output_path,
     ini_data,
+    test_type,
     decoder_path,
-    sampling_freq=10000,
+    sampling_freq=1,
     chunksize=10000,
     export_buffer=1000,
 ):
@@ -1663,17 +1664,23 @@ def stream_process_lasing_parameters_cod(
                     ]
                 )
 
+                # Map test types to suffixes
+                suffix_map = {"Baseline": "_BL", "Rollover": "_COD70", "SPD": "_COD250"}
+
+                # Pick suffix based on test_type, default to _BL if unknown
+                suffix = suffix_map.get(test_type, "_BL")
+
                 melted_entries = [
-                    ("ITH_BL", ith),
-                    ("SE_BL", slope_eff),
-                    ("RS_BL", series_r),
-                    ("PW_BL", peak_wl),
-                    ("ISPD_BL", spd_current),
-                    ("KNK1_BL", kink_current),
-                    ("KNKPPD_BL", KNKPPD_BL),
-                    ("KNKMM_BL", KNKKMM_BL),
-                    ("ILK_BL", leakage_current),
-                    ("RV_BL", reverse_voltage),
+                    (f"ITH{suffix}", ith),
+                    (f"SE{suffix}", slope_eff),
+                    (f"RS{suffix}", series_r),
+                    (f"PW{suffix}", peak_wl),
+                    (f"ISPD{suffix}", spd_current),
+                    (f"KNK1{suffix}", kink_current),
+                    (f"KNKPPD{suffix}", KNKPPD_BL),
+                    (f"KNKMM{suffix}", KNKKMM_BL),
+                    (f"ILK{suffix}", leakage_current),
+                    (f"RV{suffix}", reverse_voltage),
                 ]
 
                 for param, val in melted_entries:
@@ -1863,8 +1870,8 @@ def load_ini_data(ini_path):
         "INI_EMPID": mes_dict["operator"],
         "INI_MEAS_TYPE": mes_dict["recipe"].strip('"; '),
         "INI_PDATETIME": pdatetime,
-        "INI_XDIVIDING_FACTOR": int(setup_info_dict["xdiesize"]),
-        "INI_YDIVIDING_FACTOR": int(setup_info_dict["ydiesize"]),
+        "INI_XDIVIDING_FACTOR": float(setup_info_dict["xdiesize"]),
+        "INI_YDIVIDING_FACTOR": float(setup_info_dict["ydiesize"]),
         "INI_FINAL_RECIPE": setup_info_dict["final_recipe"],
         "FAC": "STST",
         "CARD": 0,
@@ -1930,21 +1937,38 @@ def wait_for_file_to_appear_and_be_readable(filepath, max_wait=300, delay=1):
     return False
 
 
-def extract_test_type_from_file(file_path):
+def extract_parts_and_test_type_from_filename(file_path):
     file = Path(file_path)
 
-    # Check if file is a CSV, starts with "LIV_", and ends with "_STX" in the stem
-    if file.name.startswith("LIV_") and file.suffix == ".csv" and file.stem.upper().endswith("_STX"):
-        parts = file.name.split("_")
-        if len(parts) >= 3:
-            if "COD250" in file.name.upper():
-                return "SPD"
-            elif "COD70" in file.name.upper():
-                return "Rollover"
-            else:
-                return "Baseline"
+    # Require file to be CSV and stem to end with _STX
+    if not (file.suffix.lower() == ".csv" and file.stem.upper().endswith("_STX")):
+        return None
 
-    return None
+    parts = file.stem.split("_")
+    if len(parts) < 5:  # need at least tool_name(2 parts) + wafer_id + prober_recipe + tester_recipe
+        return None
+
+    tool_name = f"{parts[0]}_{parts[1]}"  # combine with underscore
+    wafer_id = parts[2]  # e.g. QCHU5
+    prober_recipe = parts[3]  # e.g. LIVBLTKCOD
+    tester_recipe = parts[4]  # e.g. COD70 or LIV-BL-TK
+
+    # Classify based on tester_recipe
+    tester_upper = tester_recipe.upper()
+    if "COD250" in tester_upper:
+        test_type = "SPD"
+    elif "COD70" in tester_upper:
+        test_type = "Rollover"
+    else:
+        test_type = "Baseline"
+
+    return {
+        "tool_name": tool_name,
+        "wafer_id": wafer_id,
+        "prober_recipe": prober_recipe,
+        "tester_recipe": tester_recipe,
+        "test_type": test_type,
+    }
 
 
 # 🔁 Processing triggering
@@ -1972,6 +1996,7 @@ def initialise_lasing_processing(file_path, ini_dict, test_type, gtx_output_path
                 summary_output_path=gtx_output_path,
                 dat_output_path=levee_output_path,
                 ini_data=ini_dict,
+                test_type=test_type,
                 decoder_path=decoder_path,
                 sampling_freq=1,
             )
@@ -1982,6 +2007,7 @@ def initialise_lasing_processing(file_path, ini_dict, test_type, gtx_output_path
                 summary_output_path=gtx_output_path,
                 dat_output_path=levee_output_path,
                 ini_data=ini_dict,
+                test_type=test_type,
                 decoder_path=decoder_path,
                 sampling_freq=1,
             )
@@ -1992,6 +2018,7 @@ def initialise_lasing_processing(file_path, ini_dict, test_type, gtx_output_path
                 summary_output_path=gtx_output_path,
                 dat_output_path=levee_output_path,
                 ini_data=ini_dict,
+                test_type=test_type,
                 decoder_path=decoder_path,
             )
 
@@ -2023,24 +2050,32 @@ class WaferFileHandler(FileSystemEventHandler):
             detection_time_raw = datetime.now().strftime("%Y%m%d%H%M%S")
 
             # ---------- Wrap the following code in a buffer that ensures output is appended to logs --------- #
-            buffer = io.StringIO()
-            tee_out = TeeLogger(sys.__stdout__, buffer)
-            tee_err = TeeLogger(sys.__stderr__, buffer)
+            log_file = open(LOG_PATH, "a", encoding="utf-8", buffering=1)  # line-buffered
+            tee_out = TeeLogger(sys.__stdout__, log_file)
+            tee_err = TeeLogger(sys.__stderr__, log_file)
 
             sys.stdout = tee_out
             sys.stderr = tee_err
+
+            success = False
+            error_message = None
+            ini_dict = {}
 
             try:
                 tqdm.write(f"[{detection_time}] Detected new file: {file_path.name}\n")
 
                 if not wait_for_file_to_appear_and_be_readable(file_path):
-                    message = f"{file_path.name} did not become readable."
+                    message = f"[{detection_time}] ❌ {file_path.name} did not become readable."
                     tqdm.write(message)
-                    with open(LOG_PATH, "a", encoding="utf-8") as log_file:
-                        log_file.write(f"[{detection_time}] ❌ {message}\n")
                     return
 
-                test_type = extract_test_type_from_file(file_path)
+                filename_data = extract_parts_and_test_type_from_filename(file_path)
+                if not filename_data:
+                    tqdm.write(f"[{detection_time}] ❌ Could not parse filename into parts: {file_path.name}")
+                    print_watcher_banner()
+                    return
+                test_type = filename_data["test_type"]
+                tester_recipe = filename_data["tester_recipe"]
                 tqdm.write(f"\nDetected Test Type: {test_type}")
 
                 if test_type not in ("Rollover", "Baseline", "SPD"):
@@ -2054,19 +2089,19 @@ class WaferFileHandler(FileSystemEventHandler):
                 INI_LOT = ini_dict["INI_LOT"]
                 wafer_code = INI_LOT  # just for readability
 
-                gtx_output_path = RESULTS_PATH / f"{file_path.stem}_processed.csv"
-                levee_output_name = RESULTS_PATH / f"{wafer_code}_{detection_time_raw}.dat"
+                gtx_output_path = GTX_RESULTS_PATH / f"{file_path.stem}_processed.csv"
+                levee_output_name = LEVEE_RESULTS_PATH / f"{wafer_code}_{detection_time_raw}.dat"
 
                 initialise_lasing_processing(
                     file_path, ini_dict, test_type, gtx_output_path, levee_output_name
                 )  # unpacks into rest of code
 
                 # ----------------- case statement for last recipe --> shunting + triggering levee ----------------- #
-                if ini_dict["INI_MEAS_TYPE"] == ini_dict["INI_FINAL_RECIPE"]:
-                    tqdm.write(f"\nFinal Recipe Detected, Engaging Levee Protocol:\n")
+                if tester_recipe == ini_dict["INI_FINAL_RECIPE"]:
+                    tqdm.write(f"\nFinal Recipe Detected, Engaging Levee Protocol:")
 
                     # Find all .dat files in RESULTS_PATH with matching wafer_code prefix
-                    matching_dat_files = list(RESULTS_PATH.glob(f"{wafer_code}_*.dat"))
+                    matching_dat_files = list(LEVEE_RESULTS_PATH.glob(f"{wafer_code}_*.dat"))
 
                     for dat_file in matching_dat_files:
                         try:
@@ -2101,26 +2136,22 @@ class WaferFileHandler(FileSystemEventHandler):
             except Exception as e:
                 error_message = str(e)
                 tqdm.write(f"❌ Error while processing file: {e}")
-                traceback.print_exc(file=buffer)  # Include full traceback in log
+                traceback.print_exc(file=sys.stderr)  # goes to log_file via TeeLogger
 
             finally:
-                # ✅ Write final log
-                with open(LOG_PATH, "a", encoding="utf-8") as log_file:
-                    lot = ini_dict.get("INI_LOT", "UNKNOWN")
-                    log_file.write(f"\n\n========== Wafer: {lot} ==========\n")
-                    if success:
-                        log_file.write(f"[{detection_time}] ✅ Processed: {file_path.name} (Wafer: {lot})\n")
-                    else:
-                        log_file.write(f"[{detection_time}] ❌ Failed to process: {file_path.name} (Wafer: {lot})\n")
-                        if error_message:
-                            log_file.write(f"Reason: {error_message}\n")
-                    log_file.write("\n\n---- Processing Output ----\n")
-                    log_file.write(buffer.getvalue())
-                    log_file.write("---- End of Output ----\n\n")
+                lot = ini_dict.get("INI_LOT", "UNKNOWN")
+                log_file.write(f"\n\n========== Wafer: {lot} ==========\n")
+                if success:
+                    log_file.write(f"[{detection_time}] ✅ Processed: {file_path.name} (Wafer: {lot})\n")
+                else:
+                    log_file.write(f"[{detection_time}] ❌ Failed to process: {file_path.name} (Wafer: {lot})\n")
+                    if error_message:
+                        log_file.write(f"Reason: {error_message}\n")
 
                 # Always restore stdout/stderr
                 sys.stdout = sys.__stdout__
                 sys.stderr = sys.__stderr__
+                log_file.close()  # ✅ make sure file is closed
             # ---------------------------------- end of log output wrapping ---------------------------------- #
 
             print_watcher_banner()
